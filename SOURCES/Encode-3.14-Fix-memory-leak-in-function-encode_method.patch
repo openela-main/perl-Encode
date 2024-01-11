@@ -1,0 +1,97 @@
+From d77d726d206f16232df6edd80739720bb7011aea Mon Sep 17 00:00:00 2001
+From: Pali <pali@cpan.org>
+Date: Thu, 7 Oct 2021 22:35:51 +0200
+Subject: [PATCH] Fix memory leak in function encode_method()
+
+Pull request https://github.com/dankogai/p5-encode/pull/72 fixed memory
+corruption but introduced a new memory leak as dst scalar is not mortal
+anymore and not every possible exit from every XS function properly release
+scalar's memory.
+
+Fix this memory leak by making dst scalar mortal again. To not re-introduce
+that memory corruption, first store dst scalar into temporary variable and
+then save it into stack via ST(0) macro.
+---
+ Encode.xs | 23 ++++++++++++-----------
+ 1 file changed, 12 insertions(+), 11 deletions(-)
+
+diff --git a/Encode.xs b/Encode.xs
+index 4baf296..d173c96 100644
+--- a/Encode.xs
++++ b/Encode.xs
+@@ -154,7 +154,7 @@ encode_method(pTHX_ const encode_t * enc, const encpage_t * dir, SV * src, U8 *
+     STRLEN sdone = 0;
+     /* We allocate slen+1.
+        PerlIO dumps core if this value is smaller than this. */
+-    SV *dst = newSV(slen+1);
++    SV *dst = sv_2mortal(newSV(slen+1));
+     U8 *d = (U8 *)SvPVX(dst);
+     STRLEN dlen = SvLEN(dst)-1;
+     int code = 0;
+@@ -810,13 +810,12 @@ CODE:
+     tmp = encode_method(aTHX_ enc, enc->t_utf8, src, s, slen, check,
+                 &offset, term, &code, fallback_cb);
+     sv_catsv(dst, tmp);
+-    SvREFCNT_dec(tmp);
+     SvIV_set(off, (IV)offset);
+     RETVAL = (code == ENCODE_FOUND_TERM);
+ OUTPUT:
+     RETVAL
+ 
+-SV *
++void
+ Method_decode(obj,src,check_sv = &PL_sv_no)
+ SV *	obj
+ SV *	src
+@@ -828,6 +827,7 @@ PREINIT:
+     encode_t *enc;
+     U8 *s;
+     STRLEN slen;
++    SV *ret;
+ INIT:
+     SvGETMAGIC(src);
+     SvGETMAGIC(check_sv);
+@@ -841,13 +841,13 @@ CODE:
+     s = modify ? (U8 *)SvPV_force_nomg(src, slen) : (U8 *)SvPV_nomg(src, slen);
+     if (SvUTF8(src))
+         utf8_safe_downgrade(aTHX_ &src, &s, &slen, modify);
+-    RETVAL = encode_method(aTHX_ enc, enc->t_utf8, src, s, slen, check,
++    ret = encode_method(aTHX_ enc, enc->t_utf8, src, s, slen, check,
+               NULL, Nullsv, NULL, fallback_cb);
+-    SvUTF8_on(RETVAL);
+-OUTPUT:
+-    RETVAL
++    SvUTF8_on(ret);
++    ST(0) = ret;
++    XSRETURN(1);
+ 
+-SV *
++void
+ Method_encode(obj,src,check_sv = &PL_sv_no)
+ SV *	obj
+ SV *	src
+@@ -859,6 +859,7 @@ PREINIT:
+     encode_t *enc;
+     U8 *s;
+     STRLEN slen;
++    SV *ret;
+ INIT:
+     SvGETMAGIC(src);
+     SvGETMAGIC(check_sv);
+@@ -872,10 +873,10 @@ CODE:
+     s = modify ? (U8 *)SvPV_force_nomg(src, slen) : (U8 *)SvPV_nomg(src, slen);
+     if (!SvUTF8(src))
+         utf8_safe_upgrade(aTHX_ &src, &s, &slen, modify);
+-    RETVAL = encode_method(aTHX_ enc, enc->f_utf8, src, s, slen, check,
++    ret = encode_method(aTHX_ enc, enc->f_utf8, src, s, slen, check,
+               NULL, Nullsv, NULL, fallback_cb);
+-OUTPUT:
+-    RETVAL
++    ST(0) = ret;
++    XSRETURN(1);
+ 
+ bool
+ Method_needs_lines(obj)
+-- 
+2.31.1
+
